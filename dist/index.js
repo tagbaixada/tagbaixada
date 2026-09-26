@@ -1107,7 +1107,7 @@ async function startServer() {
   const port = await findAvailablePort(preferredPort);
   server.listen(port, () => console.log(`Server running on http://localhost:${port}/`));
 }
-if (!process.env.VERCEL) startServer().catch(console.error);
+if (process.env.RUN_HTTP_SERVER === "1") startServer().catch(console.error);
 export {
   app
 };
