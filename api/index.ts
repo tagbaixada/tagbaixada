@@ -1,6 +1,6 @@
 import path from "node:path";
 import express from "express";
-import { app } from "../dist/index.js";
+import { app } from "../server-bundle/index.js";
 
 app.use(express.static(path.resolve(process.cwd(), "dist/public")));
 
