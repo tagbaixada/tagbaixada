@@ -19,6 +19,6 @@ export default async function handler(req: any, res: any) {
     return app(req, res);
   } catch (error) {
     console.error("[Vercel] application initialization failed", error);
-    return res.status(500).json({ error: "Application initialization failed" });
+    return res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
   }
 }
