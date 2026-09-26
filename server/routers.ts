@@ -1,28 +1,45 @@
+import { TRPCError } from "@trpc/server";
+import { z } from "zod";
+import { audit, getCustomer, getDb, getLinks, getQrByCode, query, run } from "./db";
+import { generatePublicCode, publicQrUrl, safeExternalUrl } from "./qr";
+import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import { systemRouter } from "./_core/systemRouter";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
-import { systemRouter } from "./_core/systemRouter";
-import { publicProcedure, router } from "./_core/trpc";
+
+const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
+  if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Acesso restrito ao administrador." });
+  return next();
+});
+const customerInput = z.object({ businessName: z.string().min(2), phone: z.string().max(40).default(""), email: z.string().email().optional().or(z.literal("")), address: z.string().optional(), city: z.string().max(80).default(""), state: z.string().max(2).default(""), notes: z.string().optional(), googleReviewUrl: z.string().optional() });
+const linkInput = z.object({ customerId: z.number().int(), type: z.string().min(2), label: z.string().min(1), value: z.string().min(1), icon: z.string().default("link"), position: z.number().int().default(0), enabled: z.boolean().default(true) });
 
 export const appRouter = router({
-    // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly
   system: systemRouter,
-  auth: router({
-    me: publicProcedure.query(opts => opts.ctx.user),
-    logout: publicProcedure.mutation(({ ctx }) => {
-      const cookieOptions = getSessionCookieOptions(ctx.req);
-      ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
-      return {
-        success: true,
-      } as const;
+  auth: router({ me: publicProcedure.query(opts => opts.ctx.user), logout: publicProcedure.mutation(({ ctx }) => { ctx.res.clearCookie(COOKIE_NAME, { ...getSessionCookieOptions(ctx.req), maxAge: -1 }); return { success: true } as const; }) }),
+  public: router({ qr: publicProcedure.input(z.object({ code: z.string().min(6).max(20) })).query(async ({ input }) => getQrByCode(input.code)) }),
+  admin: router({
+    dashboard: adminProcedure.query(async () => {
+      const [counts, customers, recent] = await Promise.all([
+        query<any>("SELECT COUNT(*) total, SUM(status='ACTIVE') active, SUM(status='STOCK') stock, SUM(status='INACTIVE') inactive, COALESCE(SUM(scan_count),0) scans FROM qr_codes"),
+        query<any>("SELECT COUNT(*) total FROM customers"),
+        query<any>("SELECT a.*, q.serial_number, c.business_name FROM audit_logs a LEFT JOIN qr_codes q ON q.id = a.entity_id AND a.entity_type='qr_code' LEFT JOIN customers c ON c.id = q.customer_id ORDER BY a.created_at DESC LIMIT 8"),
+      ]);
+      const now = Date.now(); const today = (await query<any>("SELECT COUNT(*) total FROM scan_events WHERE timestamp >= ?", [new Date().setHours(0, 0, 0, 0)]))[0]?.total ?? 0; const last30 = (await query<any>("SELECT COUNT(*) total FROM scan_events WHERE timestamp >= ?", [now - 30 * 86400000]))[0]?.total ?? 0;
+      return { cards: { ...(counts[0] ?? {}), customers: customers[0]?.total ?? 0, scansToday: today, scans30: last30 }, recent };
     }),
+    customers: adminProcedure.input(z.object({ search: z.string().optional() }).default({})).query(({ input }) => query<any>("SELECT * FROM customers WHERE (? = '' OR business_name LIKE ? OR phone LIKE ?) ORDER BY created_at DESC", [input.search ?? "", `%${input.search ?? ""}%`, `%${input.search ?? ""}%`])),
+    customer: adminProcedure.input(z.object({ id: z.number() })).query(({ input }) => getCustomer(input.id)),
+    createCustomer: adminProcedure.input(customerInput).mutation(async ({ input, ctx }) => { const now = Date.now(); const result = await run("INSERT INTO customers (business_name, phone, email, address, city, state, notes, google_review_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [input.businessName, input.phone, input.email || null, input.address || null, input.city, input.state.toUpperCase(), input.notes || null, safeExternalUrl(input.googleReviewUrl) || null, now, now]); const id = Number(result.lastInsertRowid); await audit("CUSTOMER_CREATED", "customer", id, input, ctx.user.openId); return { id }; }),
+    updateCustomer: adminProcedure.input(customerInput.extend({ id: z.number() })).mutation(async ({ input, ctx }) => { await run("UPDATE customers SET business_name=?, phone=?, email=?, address=?, city=?, state=?, notes=?, google_review_url=?, updated_at=? WHERE id=?", [input.businessName, input.phone, input.email || null, input.address || null, input.city, input.state.toUpperCase(), input.notes || null, safeExternalUrl(input.googleReviewUrl) || null, Date.now(), input.id]); await audit("CUSTOMER_UPDATED", "customer", input.id, input, ctx.user.openId); return { success: true }; }),
+    qrs: adminProcedure.input(z.object({ status: z.string().optional(), search: z.string().optional() }).default({})).query(({ input }) => query<any>("SELECT q.*, c.business_name, c.phone FROM qr_codes q LEFT JOIN customers c ON c.id=q.customer_id WHERE (? = '' OR q.status=?) AND (? = '' OR CAST(q.serial_number AS TEXT) LIKE ? OR q.public_code LIKE ? OR c.business_name LIKE ? OR c.phone LIKE ?) ORDER BY q.serial_number ASC", [input.status ?? "", input.status ?? "", input.search ?? "", `%${input.search ?? ""}%`, `%${input.search ?? ""}%`, `%${input.search ?? ""}%`, `%${input.search ?? ""}%`])),
+    createBatch: adminProcedure.input(z.object({ quantity: z.number().int().min(1).max(500), startingSerial: z.number().int().min(1) })).mutation(async ({ input, ctx }) => { const now = Date.now(); const items: Array<{ serial: number; code: string }> = []; for (let i=0; i<input.quantity; i++) { let code = generatePublicCode(); while ((await query<any>("SELECT id FROM qr_codes WHERE public_code=?", [code])).length) code = generatePublicCode(); const serial = input.startingSerial + i; await run("INSERT INTO qr_codes (serial_number, public_code, status, mode, created_at, updated_at) VALUES (?, ?, 'STOCK', 'GOOGLE_REVIEW', ?, ?)", [serial, code, now, now]); items.push({ serial, code }); } const batch = await run("INSERT INTO batches (batch_number, quantity, status, created_at, manifest_json) VALUES (COALESCE((SELECT MAX(batch_number)+1 FROM batches),1), ?, 'COMPLETED', ?, ?)", [items.length, now, JSON.stringify(items)]); await audit("BATCH_CREATED", "batch", Number(batch.lastInsertRowid), { quantity: items.length }, ctx.user.openId); return { batchId: Number(batch.lastInsertRowid), items }; }),
+    assignQr: adminProcedure.input(z.object({ qrId: z.number(), customerId: z.number(), mode: z.enum(["GOOGLE_REVIEW", "LANDING_PAGE"]), destinationUrl: z.string().optional() })).mutation(async ({ input, ctx }) => { const customer = await getCustomer(input.customerId); if (!customer) throw new TRPCError({ code: "NOT_FOUND", message: "Cliente não encontrado." }); const destination = input.mode === "GOOGLE_REVIEW" ? safeExternalUrl(customer.google_review_url) : null; if (input.mode === "GOOGLE_REVIEW" && !destination) throw new TRPCError({ code: "BAD_REQUEST", message: "Cadastre ou selecione o Google Review URL antes de ativar." }); await run("UPDATE qr_codes SET customer_id=?, status='ACTIVE', mode=?, destination_url=?, reserved_at=COALESCE(reserved_at, ?), activated_at=?, updated_at=? WHERE id=? AND status IN ('STOCK','RESERVED')", [input.customerId, input.mode, destination || input.destinationUrl || null, Date.now(), Date.now(), Date.now(), input.qrId]); await audit("QR_ACTIVATED", "qr_code", input.qrId, input, ctx.user.openId); return { success: true }; }),
+    setQrStatus: adminProcedure.input(z.object({ id: z.number(), status: z.enum(["INACTIVE", "ACTIVE"]) })).mutation(async ({ input, ctx }) => { await run("UPDATE qr_codes SET status=?, updated_at=? WHERE id=?", [input.status, Date.now(), input.id]); await audit(input.status === "ACTIVE" ? "QR_ACTIVATED" : "QR_DEACTIVATED", "qr_code", input.id, input, ctx.user.openId); return { success: true }; }),
+    updateQr: adminProcedure.input(z.object({ id: z.number(), mode: z.enum(["GOOGLE_REVIEW", "LANDING_PAGE"]), destinationUrl: z.string().optional() })).mutation(async ({ input, ctx }) => { const url = input.destinationUrl ? safeExternalUrl(input.destinationUrl) : null; await run("UPDATE qr_codes SET mode=?, destination_url=?, updated_at=? WHERE id=?", [input.mode, url, Date.now(), input.id]); await audit("DESTINATION_CHANGED", "qr_code", input.id, input, ctx.user.openId); return { success: true }; }),
+    links: adminProcedure.input(z.object({ customerId: z.number() })).query(({ input }) => getLinks(input.customerId)),
+    saveLink: adminProcedure.input(linkInput.extend({ id: z.number().optional() })).mutation(async ({ input, ctx }) => { if (input.id) await run("UPDATE links SET type=?, label=?, value=?, icon=?, position=?, enabled=?, updated_at=? WHERE id=?", [input.type, input.label, input.value, input.icon, input.position, input.enabled ? 1 : 0, Date.now(), input.id]); else await run("INSERT INTO links (customer_id,type,label,value,icon,position,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)", [input.customerId, input.type, input.label, input.value, input.icon, input.position, input.enabled ? 1 : 0, Date.now(), Date.now()]); await audit("LINKS_CHANGED", "customer", input.customerId, input, ctx.user.openId); return { success: true }; }),
+    audit: adminProcedure.input(z.object({ entityType: z.string().optional(), entityId: z.number().optional() }).default({})).query(({ input }) => query<any>("SELECT * FROM audit_logs WHERE (? = '' OR entity_type = ?) AND (? IS NULL OR entity_id = ?) ORDER BY created_at DESC LIMIT 100", [input.entityType ?? "", input.entityType ?? "", input.entityId ?? null, input.entityId ?? null])),
   }),
-
-  // TODO: add feature routers here, e.g.
-  // todo: router({
-  //   list: protectedProcedure.query(({ ctx }) =>
-  //     db.getUserTodos(ctx.user.id)
-  //   ),
-  // }),
 });
-
 export type AppRouter = typeof appRouter;

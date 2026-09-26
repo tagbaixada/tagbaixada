@@ -8,59 +8,23 @@ import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
+import { resolvePublicQr } from "../qr";
+import { getLinks, query } from "../db";
+import { posterPdf, posterSvgWithQr, qrPng, zipFiles } from "../artwork";
 
-function isPortAvailable(port: number): Promise<boolean> {
-  return new Promise(resolve => {
-    const server = net.createServer();
-    server.listen(port, () => {
-      server.close(() => resolve(true));
-    });
-    server.on("error", () => resolve(false));
-  });
+export const app = express();
+function isPortAvailable(port: number): Promise<boolean> { return new Promise(resolve => { const server = net.createServer(); server.listen(port, () => server.close(() => resolve(true))); server.on("error", () => resolve(false)); }); }
+async function findAvailablePort(startPort = 3000) { for (let port = startPort; port < startPort + 20; port++) if (await isPortAvailable(port)) return port; throw new Error(`No available port found starting from ${startPort}`); }
+const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>\"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char] as string));
+function publicHtml(title: string, body: string) { return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · RSA Digital</title><style>body{margin:0;background:#eff5ff;color:#102a43;font-family:Arial,sans-serif;min-height:100vh;display:grid;place-items:center}.card{width:min(92vw,480px);background:#fff;border-radius:28px;padding:34px;box-shadow:0 18px 50px #174f9126;text-align:center}h1{margin:4px 0 10px;font-size:28px}.muted{color:#60758b;line-height:1.6}.links{display:grid;gap:12px;margin-top:26px}.links a,.links button{border:0;border-radius:14px;background:#0e4b9b;color:#fff;padding:15px;font-weight:700;text-decoration:none;font-size:15px;cursor:pointer}</style></head><body><main class="card">${body}</main></body></html>`; }
+function registerPublicRoutes() {
+  app.get(/^\/([A-Z0-9]{6,20})$/, async (req, res, next) => { const code = req.params[0]; try { const result = await resolvePublicQr(code, String(req.headers["user-agent"] ?? "")); if (result.kind === "NOT_FOUND") return res.status(404).send(publicHtml("Código não encontrado", "<h1>QR Code não encontrado</h1><p class=\"muted\">Confira o código impresso na placa.</p>")); if (result.kind === "NOT_CONFIGURED") return res.send(publicHtml("QR ainda não configurado", "<h1>Este QR ainda não foi configurado</h1><p class=\"muted\">O código está reservado para uma nova placa.</p>")); if (result.kind === "INACTIVE") return res.status(410).send(publicHtml("Código indisponível", "<h1>Código indisponível</h1><p class=\"muted\">Este QR Code foi desativado.</p>")); const qr = result.qr; if (qr.mode === "GOOGLE_REVIEW" && qr.destination_url) return res.redirect(qr.destination_url); const links = qr.customer_id ? await getLinks(qr.customer_id) : []; const visible = links.filter((link: any) => Number(link.enabled)); const buttons = visible.map((link: any) => link.type === "PIX" ? `<button onclick=\"navigator.clipboard.writeText('${escapeHtml(link.value)}');this.textContent='Chave Pix copiada'\">${escapeHtml(link.label)}</button>` : `<a href=\"${escapeHtml(link.value)}\" target=\"_blank\" rel=\"noopener noreferrer\">${escapeHtml(link.label)}</a>`).join(""); return res.send(publicHtml(qr.business_name || "RSA Digital", `<div style=\"width:76px;height:76px;border-radius:22px;background:#0e4b9b;color:#ffd74b;display:grid;place-items:center;margin:0 auto 18px;font-weight:900;font-size:22px\">RSA</div><h1>${escapeHtml(qr.business_name || "Sua empresa")}</h1><p class=\"muted\">Acesse os canais oficiais e deixe sua avaliação.</p><div class=\"links\">${buttons}</div>`)); } catch (error) { next(error); } });
+  app.get("/api/artwork/:code.svg", async (req, res) => { const qr = await query<any>("SELECT * FROM qr_codes WHERE public_code=? LIMIT 1", [req.params.code]); if (!qr[0]) return res.status(404).end(); res.type("image/svg+xml").send(await posterSvgWithQr(qr[0].serial_number, qr[0].public_code)); });
+  app.get("/api/artwork/:code.png", async (req, res) => { const qr = await query<any>("SELECT * FROM qr_codes WHERE public_code=? LIMIT 1", [req.params.code]); if (!qr[0]) return res.status(404).end(); res.type("image/png").send(await qrPng(qr[0].public_code)); });
+  app.get("/api/artwork/:code.pdf", async (req, res) => { const qr = await query<any>("SELECT * FROM qr_codes WHERE public_code=? LIMIT 1", [req.params.code]); if (!qr[0]) return res.status(404).end(); res.type("application/pdf").send(await posterPdf([{ serial: qr[0].serial_number, code: qr[0].public_code }])); });
+  app.get("/api/batches/:id.zip", async (req, res) => { const batch = (await query<any>("SELECT * FROM batches WHERE id=?", [Number(req.params.id)]))[0]; if (!batch) return res.status(404).end(); const items = JSON.parse(batch.manifest_json) as Array<{ serial:number; code:string }>; const files = await Promise.all(items.map(async item => ({ name: `QR-${String(item.serial).padStart(6, "0")}.svg`, data: await posterSvgWithQr(item.serial, item.code) }))); res.type("application/zip").setHeader("Content-Disposition", `attachment; filename=QR-LOTE-${batch.batch_number}.zip`).send(await zipFiles(files)); });
 }
-
-async function findAvailablePort(startPort: number = 3000): Promise<number> {
-  for (let port = startPort; port < startPort + 20; port++) {
-    if (await isPortAvailable(port)) {
-      return port;
-    }
-  }
-  throw new Error(`No available port found starting from ${startPort}`);
-}
-
-async function startServer() {
-  const app = express();
-  const server = createServer(app);
-  // Configure body parser with larger size limit for file uploads
-  app.use(express.json({ limit: "50mb" }));
-  app.use(express.urlencoded({ limit: "50mb", extended: true }));
-  registerStorageProxy(app);
-  registerOAuthRoutes(app);
-  // tRPC API
-  app.use(
-    "/api/trpc",
-    createExpressMiddleware({
-      router: appRouter,
-      createContext,
-    })
-  );
-  // development mode uses Vite, production mode uses static files
-  if (process.env.NODE_ENV === "development") {
-    await setupVite(app, server);
-  } else {
-    serveStatic(app);
-  }
-
-  const preferredPort = parseInt(process.env.PORT || "3000");
-  const port = await findAvailablePort(preferredPort);
-
-  if (port !== preferredPort) {
-    console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
-  }
-
-  server.listen(port, () => {
-    console.log(`Server running on http://localhost:${port}/`);
-  });
-}
-
-startServer().catch(console.error);
+function configureApp() { app.use(express.json({ limit: "50mb" })); app.use(express.urlencoded({ limit: "50mb", extended: true })); registerStorageProxy(app); registerOAuthRoutes(app); registerPublicRoutes(); app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext })); }
+configureApp();
+async function startServer() { const server = createServer(app); if (process.env.NODE_ENV === "development") await setupVite(app, server); else serveStatic(app); const preferredPort = parseInt(process.env.PORT || "3000"); const port = await findAvailablePort(preferredPort); server.listen(port, () => console.log(`Server running on http://localhost:${port}/`)); }
+if (!process.env.VERCEL) startServer().catch(console.error);
