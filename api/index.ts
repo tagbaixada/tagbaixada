@@ -4,4 +4,6 @@ import { app } from "../dist/index.js";
 
 app.use(express.static(path.resolve(process.cwd(), "dist/public")));
 
-export default app;
+export default function handler(req: any, res: any) {
+  return app(req, res);
+}
