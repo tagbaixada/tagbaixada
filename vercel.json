@@ -1,4 +1,5 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "pnpm build",
   "outputDirectory": "dist/public",
   "functions": {
@@ -8,14 +9,14 @@
   },
   "rewrites": [
     {
-      "source": "/(.*)",
+      "source": "/:path*",
       "has": [
         {
           "type": "host",
           "value": "go.rsadigitalconsultoria.com.br"
         }
       ],
-      "destination": "/api/$1"
+      "destination": "/api/:path*"
     }
   ]
 }
