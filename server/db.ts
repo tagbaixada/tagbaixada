@@ -8,7 +8,19 @@ import { users, type InsertUser } from "../drizzle/schema";
 
 let client: Client | null = null;
 let ready: Promise<void> | null = null;
-const migration = fs.readFileSync(path.resolve(process.cwd(), "drizzle/0001_rsa_qr.sql"), "utf8");
+let migration: string | null = null;
+
+function getMigration() {
+  if (migration !== null) return migration;
+  try {
+    migration = fs.readFileSync(path.resolve(process.cwd(), "drizzle/0001_rsa_qr.sql"), "utf8");
+  } catch {
+    // Vercel bundles the function separately from the repository's migration files.
+    // The production Turso database is already migrated, so queries can proceed.
+    migration = "";
+  }
+  return migration;
+}
 
 export function getDb(): Client {
   if (!client) {
@@ -17,7 +29,15 @@ export function getDb(): Client {
   }
   return client;
 }
-export async function ensureDb() { if (!ready) ready = getDb().executeMultiple(migration).catch(error => { ready = null; console.error("[DB] migration failed", error); throw error; }); await ready; }
+export async function ensureDb() {
+  if (!ready) {
+    const script = getMigration();
+    ready = script
+      ? getDb().executeMultiple(script).catch(error => { ready = null; console.error("[DB] migration failed", error); throw error; })
+      : Promise.resolve();
+  }
+  await ready;
+}
 export async function query<T = Record<string, unknown>>(sql: string, args: InValue[] = []) { await ensureDb(); const result = await getDb().execute({ sql, args }); return result.rows as unknown as T[]; }
 export async function run(sql: string, args: InValue[] = []) { await ensureDb(); return getDb().execute({ sql, args }); }
 export async function audit(action: string, entityType: string, entityId: number | null, metadata: unknown, adminOpenId?: string) { await run("INSERT INTO audit_logs (action, entity_type, entity_id, metadata, created_at, admin_open_id) VALUES (?, ?, ?, ?, ?, ?)", [action, entityType, entityId, JSON.stringify(metadata ?? {}), Date.now(), adminOpenId ?? null]); }

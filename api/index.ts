@@ -1,8 +1,9 @@
 import path from "node:path";
 import express from "express";
-import { app } from "../server/_core/index";
+import { app } from "../server-bundle/index.js";
 
-// Vercel serves the compiled Vite assets from the same serverless entrypoint.
 app.use(express.static(path.resolve(process.cwd(), "dist/public")));
 
-export default app;
+export default function handler(req: any, res: any) {
+  return app(req, res);
+}
