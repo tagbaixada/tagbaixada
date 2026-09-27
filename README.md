@@ -9,7 +9,7 @@ MVP full-stack para placas físicas com **QR Code e NFC permanentes**. Cada plac
 - **Banco:** SQLite/libSQL via `@libsql/client`, conectado ao Turso. O banco é acessado exclusivamente no servidor.
 - **QR:** public codes aleatórios, não sequenciais, únicos e independentes do ID interno.
 - **Público:** resolver de QR que registra scan, redireciona para `google_review_url` manual ou renderiza landing page.
-- **Arte:** SVG de impressão, PNG, PDF e ZIP de SVGs; os arquivos são derivados do registro correto.
+- **Arte:** SVG de impressão, PNG de alta resolução, PDF e ZIP; os arquivos são derivados do registro correto e persistidos no storage.
 - **Integrações:** Turso/libSQL, Manus OAuth, GitHub e Cloudflare DNS. **Não há Google Places, Google Places API, busca automática, Place ID ou scraping.**
 
 ## Fluxo Google Review manual
@@ -26,10 +26,17 @@ MVP full-stack para placas físicas com **QR Code e NFC permanentes**. Cada plac
 - `/api/trpc/admin.dashboard` — indicadores, atividade e scans.
 - `/api/trpc/admin.qrs` — inventário, pesquisa e filtros.
 - `/api/trpc/admin.createBatch` — geração de lote com unicidade.
+- `/api/trpc/admin.generateBatchChunk` — geração incremental de até 10 artes por chamada.
 - `/api/trpc/admin.customers` — cadastro e pesquisa de clientes.
 - `/api/trpc/admin.createCustomer` — inclui `google_review_url` manual.
 - `/api/artwork/{public_code}.svg|png|pdf` — arte individual.
 - `/api/batches/{id}.zip` — ZIP de artes do lote.
+
+## Etapa 5 — gerador de lotes e artes para impressão
+
+O botão **Gerar lote** cria os QR Codes em estoque e inicia a produção das artes em blocos de até 10 itens. Cada bloco gera o SVG, PNG e PDF do serial correspondente e grava os três arquivos no storage S3 compatível do ambiente; o manifesto do lote guarda apenas as chaves dos objetos, nunca os bytes no banco.
+
+O lote passa por `GENERATING` para `READY`. O painel mostra o progresso e só libera o ZIP quando todos os itens estão prontos. O endpoint de download monta o ZIP a partir dos arquivos persistidos, evitando uma requisição única de vários minutos e tornando o fluxo compatível com o limite de execução da Vercel. Cada arte contém o QR permanente `https://go.rsadigitalconsultoria.com.br/{public_code}` e a correspondência serial ↔ public code fica registrada no manifesto.
 
 ## Variáveis de ambiente
 

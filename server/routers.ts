@@ -3,6 +3,8 @@ import { z } from "zod";
 import type { InValue } from "@libsql/client";
 import { audit, getCustomer, getDb, getLinks, getQrByCode, query, run } from "./db";
 import { generatePublicCode, publicQrUrl, safeExternalUrl } from "./qr";
+import { posterPdf, posterPng, posterSvgWithQr } from "./artwork";
+import { storagePut } from "./storage";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { systemRouter } from "./_core/systemRouter";
 import { COOKIE_NAME } from "@shared/const";
@@ -196,12 +198,34 @@ export const appRouter = router({
       }
       const now = Date.now();
       const statements: Array<{ sql: string; args: InValue[] }> = items.map(item => ({ sql: "INSERT INTO qr_codes (serial_number, public_code, status, mode, created_at, updated_at) VALUES (?, ?, 'STOCK', 'GOOGLE_REVIEW', ?, ?)", args: [item.serial, item.code, now, now] }));
-      statements.push({ sql: "INSERT INTO batches (batch_number, quantity, status, created_at, manifest_json) VALUES (COALESCE((SELECT MAX(batch_number)+1 FROM batches),1), ?, 'COMPLETED', ?, ?)", args: [items.length, now, JSON.stringify(items)] });
+      statements.push({ sql: "INSERT INTO batches (batch_number, quantity, status, created_at, manifest_json) VALUES (COALESCE((SELECT MAX(batch_number)+1 FROM batches),1), ?, 'GENERATING', ?, ?)", args: [items.length, now, JSON.stringify({ items, artifacts: {} })] });
       const results = await getDb().batch(statements);
       const batchId = Number(results[items.length]?.lastInsertRowid ?? 0);
       await audit("BATCH_CREATED", "batch", batchId, { quantity: items.length, firstSerial: serials[0], lastSerial: serials[serials.length - 1] }, ctx.user.openId);
       for (let index = 0; index < items.length; index += 1) await audit("QR_CREATED", "qr_code", Number(results[index]?.lastInsertRowid ?? 0) || null, items[index], ctx.user.openId);
       return { batchId, requested: input.quantity, created: items.length, errors: 0, firstSerial: serials[0], lastSerial: serials[serials.length - 1], items };
+    }),
+    generateBatchChunk: adminProcedure.input(z.object({ batchId: z.number().int().positive(), offset: z.number().int().min(0), limit: z.number().int().min(1).max(10).default(10) })).mutation(async ({ input, ctx }) => {
+      const batch = (await query<any>("SELECT * FROM batches WHERE id=? LIMIT 1", [input.batchId]))[0];
+      if (!batch) throw new TRPCError({ code: "NOT_FOUND", message: "Lote não encontrado." });
+      const manifest = JSON.parse(batch.manifest_json) as { items: Array<{ serial: number; code: string }>; artifacts?: Record<string, { svgKey: string; pngKey: string; pdfKey: string }> };
+      const artifacts = manifest.artifacts ?? {};
+      const items = manifest.items.slice(input.offset, input.offset + input.limit);
+      if (!items.length) return { batchId: input.batchId, status: batch.status, offset: input.offset, processed: 0, total: manifest.items.length };
+      for (const item of items) {
+        const key = String(item.serial).padStart(6, "0");
+        const [svg, png, pdf] = await Promise.all([posterSvgWithQr(item.serial, item.code), posterPng(item.serial, item.code), posterPdf([item])]);
+        const [svgPut, pngPut, pdfPut] = await Promise.all([
+          storagePut(`qr-batches/${input.batchId}/SVG/QR-${key}.svg`, svg, "image/svg+xml"),
+          storagePut(`qr-batches/${input.batchId}/PNG/QR-${key}.png`, png, "image/png"),
+          storagePut(`qr-batches/${input.batchId}/PDF/QR-${key}.pdf`, pdf, "application/pdf"),
+        ]);
+        artifacts[item.code] = { svgKey: svgPut.key, pngKey: pngPut.key, pdfKey: pdfPut.key };
+      }
+      const complete = Object.keys(artifacts).length >= manifest.items.length;
+      await run("UPDATE batches SET status=?, manifest_json=? WHERE id=?", [complete ? "READY" : "GENERATING", JSON.stringify({ items: manifest.items, artifacts }), input.batchId]);
+      await audit("BATCH_ARTWORK_CHUNK", "batch", input.batchId, { offset: input.offset, processed: items.length, total: manifest.items.length, status: complete ? "READY" : "GENERATING" }, ctx.user.openId);
+      return { batchId: input.batchId, status: complete ? "READY" : "GENERATING", offset: input.offset, processed: items.length, total: manifest.items.length };
     }),
     reserveQr: adminProcedure.input(z.object({ id: z.number().int().positive() })).mutation(async ({ input, ctx }) => {
       const qr = await getQr(input.id);
