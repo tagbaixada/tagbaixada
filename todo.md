@@ -1,10 +1,10 @@
 # Etapa 4 — Fluxo operacional completo de QR Codes e clientes
 
-- [ ] Auditar schema, backend, painel e resolver atuais
-- [ ] Completar regras de QR, clientes, status, scans e auditoria
-- [ ] Completar telas e ações operacionais do painel
-- [ ] Adicionar testes automatizados e fluxo ponta a ponta
-- [ ] Executar migration, commit, deploy Production e validar domínios
+- [x] Auditar schema, backend, painel e resolver atuais
+- [x] Completar regras de QR, clientes, status, scans e auditoria
+- [x] Completar telas e ações operacionais do painel
+- [x] Adicionar testes automatizados e fluxo ponta a ponta
+- [x] Executar migration, commit, deploy Production e validar domínios
 
 ## Fora do escopo desta etapa
 
