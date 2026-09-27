@@ -28,7 +28,11 @@ export async function resolvePublicQr(publicCode: string, userAgent = "") {
   if (!qr) return { kind: "NOT_FOUND" as const };
   if (qr.status === "STOCK" || qr.status === "RESERVED") return { kind: "NOT_CONFIGURED" as const, qr };
   if (qr.status === "INACTIVE") return { kind: "INACTIVE" as const, qr };
-  await run("UPDATE qr_codes SET scan_count = scan_count + 1, last_scan_at = ?, updated_at = ? WHERE id = ?", [Date.now(), Date.now(), qr.id]);
-  await run("INSERT INTO scan_events (qr_id, timestamp, user_agent) VALUES (?, ?, ?)", [qr.id, Date.now(), userAgent.slice(0, 240)]);
+  try {
+    await run("UPDATE qr_codes SET scan_count = scan_count + 1, last_scan_at = ?, updated_at = ? WHERE id = ?", [Date.now(), Date.now(), qr.id]);
+    await run("INSERT INTO scan_events (qr_id, timestamp, user_agent) VALUES (?, ?, ?)", [qr.id, Date.now(), userAgent.slice(0, 240)]);
+  } catch {
+    // Analytics failure must never block the permanent QR destination.
+  }
   return { kind: "ACTIVE" as const, qr };
 }
