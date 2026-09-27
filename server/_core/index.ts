@@ -3,7 +3,6 @@ import express from "express";
 import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
@@ -12,7 +11,7 @@ import { resolvePublicQr, safeExternalUrl } from "../qr";
 import { getLinks, query } from "../db";
 import { posterPdf, posterPng, posterSvgWithQr, zipFiles } from "../artwork";
 import { storageGetSignedUrl } from "../storage";
-import { sdk } from "./sdk";
+import { authenticateLocalRequest } from "./localAuth";
 import QRCode from "qrcode";
 
 export const app = express();
@@ -35,7 +34,7 @@ async function landingBody(qr: any, links: any[]) {
 }
 async function requireArtworkAdmin(req: express.Request, res: express.Response) {
   try {
-    const user = await sdk.authenticateRequest(req);
+    const user = await authenticateLocalRequest(req);
     if (user.role !== "admin") { res.status(403).json({ error: "Admin access required" }); return false; }
     return true;
   } catch { res.status(401).json({ error: "Authentication required" }); return false; }
@@ -47,7 +46,7 @@ function registerPublicRoutes() {
   app.get("/api/artwork/:code.pdf", async (req, res) => { if (!await requireArtworkAdmin(req, res)) return; const qr = await query<any>("SELECT * FROM qr_codes WHERE public_code=? LIMIT 1", [req.params.code]); if (!qr[0]) return res.status(404).end(); res.type("application/pdf").send(await posterPdf([{ serial: qr[0].serial_number, code: qr[0].public_code }])); });
   app.get("/api/batches/:id.zip", async (req, res) => { if (!await requireArtworkAdmin(req, res)) return; const batch = (await query<any>("SELECT * FROM batches WHERE id=?", [Number(req.params.id)]))[0]; if (!batch) return res.status(404).end(); const parsed = JSON.parse(batch.manifest_json); const items = Array.isArray(parsed) ? parsed : parsed.items; if (batch.status !== "READY" || !parsed.artifacts) return res.status(409).json({ error: "A geração das artes ainda não foi concluída." }); const first = items[0]?.serial ?? 0; const last = items.at(-1)?.serial ?? 0; const prefix = `LOTE-${String(first).padStart(6, "0")}-${String(last).padStart(6, "0")}`; const files: Array<{ name: string; data: Buffer | string }> = []; for (const item of items) { const artifact = parsed.artifacts[item.code]; if (!artifact) return res.status(409).json({ error: "Manifesto incompleto." }); for (const [folder, keyName] of [["SVG", "svgKey"], ["PNG", "pngKey"], ["PDF", "pdfKey"]] as const) { const url = await storageGetSignedUrl(artifact[keyName]); const response = await fetch(url); if (!response.ok) return res.status(502).json({ error: `Falha ao ler ${folder} do storage.` }); files.push({ name: `${prefix}/${folder}/QR-${String(item.serial).padStart(6, "0")}.${folder.toLowerCase()}`, data: Buffer.from(await response.arrayBuffer()) }); } } files.push({ name: `${prefix}/manifest.json`, data: JSON.stringify({ template: "RSA Digital — Conecte-se conosco", items }, null, 2) }); const zip = await zipFiles(files); res.type("application/zip").setHeader("Content-Disposition", `attachment; filename=${prefix}.zip`).send(zip); });
 }
-function configureApp() { app.use(express.json({ limit: "50mb" })); app.use(express.urlencoded({ limit: "50mb", extended: true })); registerStorageProxy(app); registerOAuthRoutes(app); registerPublicRoutes(); app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext })); }
+function configureApp() { app.use(express.json({ limit: "50mb" })); app.use(express.urlencoded({ limit: "50mb", extended: true })); registerStorageProxy(app); registerPublicRoutes(); app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext })); }
 configureApp();
 async function startServer() { const server = createServer(app); if (process.env.NODE_ENV === "development") await setupVite(app, server); else serveStatic(app); const preferredPort = parseInt(process.env.PORT || "3000"); const port = await findAvailablePort(preferredPort); server.listen(port, () => console.log(`Server running on http://localhost:${port}/`)); }
 if (process.env.RUN_HTTP_SERVER === "1") startServer().catch(console.error);

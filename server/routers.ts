@@ -1,7 +1,7 @@
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import type { InValue } from "@libsql/client";
-import { audit, getCustomer, getDb, getLinks, getQrByCode, query, run } from "./db";
+import { audit, getCustomer, getDb, getLinks, getQrByCode, getUserByEmail, getUserByOpenId, query, run } from "./db";
 import { generatePublicCode, publicQrUrl, safeExternalUrl } from "./qr";
 import { posterPdf, posterPng, posterSvgWithQr } from "./artwork";
 import { storagePut } from "./storage";
@@ -9,6 +9,7 @@ import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { systemRouter } from "./_core/systemRouter";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
+import { hashPassword, setLocalSession, verifyPassword } from "./_core/localAuth";
 
 const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
   if (ctx.user.role !== "admin") {
@@ -129,6 +130,22 @@ export const appRouter = router({
   system: systemRouter,
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
+    login: publicProcedure.input(z.object({ email: z.string().trim().email(), password: z.string().min(1).max(200) })).mutation(async ({ input, ctx }) => {
+      const user = await getUserByEmail(input.email.toLowerCase());
+      if (!user || !String(user.openId).startsWith("local:") || !(await verifyPassword(input.password, user.passwordHash))) throw new TRPCError({ code: "UNAUTHORIZED", message: "E-mail ou senha inválidos." });
+      const now = Date.now();
+      await run("UPDATE users SET last_signed_in=?, updated_at=? WHERE id=?", [now, now, user.id]);
+      await setLocalSession(ctx.res, ctx.req, user.openId, user.name || user.email || "Administrador");
+      return { id: user.id, openId: user.openId, name: user.name, email: user.email, role: user.role, mustChangePassword: Number(user.mustChangePassword) === 1 };
+    }),
+    changePassword: protectedProcedure.input(z.object({ currentPassword: z.string().min(1).max(200), newPassword: z.string().min(12).max(200) })).mutation(async ({ input, ctx }) => {
+      const user = await getUserByOpenId(ctx.user.openId);
+      if (!user || !(await verifyPassword(input.currentPassword, user.passwordHash))) throw new TRPCError({ code: "UNAUTHORIZED", message: "Senha atual inválida." });
+      if (input.currentPassword === input.newPassword) throw new TRPCError({ code: "BAD_REQUEST", message: "A nova senha deve ser diferente da atual." });
+      const now = Date.now();
+      await run("UPDATE users SET password_hash=?, must_change_password=0, updated_at=?, last_signed_in=? WHERE id=?", [await hashPassword(input.newPassword), now, now, user.id]);
+      return { success: true } as const;
+    }),
     logout: publicProcedure.mutation(({ ctx }) => {
       ctx.res.clearCookie(COOKIE_NAME, { ...getSessionCookieOptions(ctx.req), maxAge: -1 });
       return { success: true } as const;

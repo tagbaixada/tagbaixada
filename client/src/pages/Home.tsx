@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { startLogin } from "@/const";
 import { trpc } from "@/lib/trpc";
 import { BarChart3, CheckCircle2, ChevronRight, CircleUserRound, ExternalLink, FileArchive, LayoutDashboard, LogOut, Plus, Search, ShieldCheck, Sparkles, UsersRound, Boxes, X } from "lucide-react";
 
@@ -17,6 +16,11 @@ function StatusPill({ status }: { status: string }) { return <span className={`p
 
 export default function Home() {
   const { user, loading, logout } = useAuth();
+  const [loginEmail, setLoginEmail] = useState("tagbaixada@gmail.com");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [authMessage, setAuthMessage] = useState("");
   const [section, setSection] = useState("dashboard");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
@@ -51,10 +55,14 @@ export default function Home() {
   const activateQr = trpc.admin.activateQr.useMutation({ onSuccess: () => { notify("QR ativado."); refresh(); }, onError });
   const deactivateQr = trpc.admin.deactivateQr.useMutation({ onSuccess: () => { notify("QR desativado."); refresh(); }, onError });
   const saveLink = trpc.admin.saveLink.useMutation({ onSuccess: () => notify("Link da landing page salvo."), onError });
+  const trpcUtils = trpc.useUtils();
+  const login = trpc.auth.login.useMutation({ onSuccess: async () => { setLoginPassword(""); setAuthMessage(""); await trpcUtils.auth.me.invalidate(); }, onError: error => setAuthMessage(error.message) });
+  const changePassword = trpc.auth.changePassword.useMutation({ onSuccess: async () => { setCurrentPassword(""); setNewPassword(""); setAuthMessage("Senha atualizada. Acesso administrativo liberado."); await trpcUtils.auth.me.invalidate(); }, onError: error => setAuthMessage(error.message) });
 
   const activeNav = useMemo(() => nav.find(item => item.key === section) ?? nav[0], [section]);
   if (loading) return <div className="loading-screen"><div className="brand-mark">RSA</div><p>Carregando painel seguro…</p></div>;
-  if (!user) return <div className="login-screen"><div className="login-card"><div className="brand-mark">RSA</div><p className="eyebrow">CONTROLE DE QR CODES</p><h1>Um destino. <em>Infinitas possibilidades.</em></h1><p className="muted">Gerencie placas, clientes e URLs permanentes da RSA Digital.</p><Button onClick={() => startLogin()}>Entrar como administrador <ChevronRight size={18} /></Button></div></div>;
+  if (!user) return <div className="login-screen"><div className="login-card"><div className="brand-mark">RSA</div><p className="eyebrow">CONTROLE DE QR CODES</p><h1>Um destino. <em>Infinitas possibilidades.</em></h1><p className="muted">Acesso administrativo independente.</p><form className="login-form" onSubmit={event => { event.preventDefault(); setAuthMessage(""); login.mutate({ email: loginEmail, password: loginPassword }); }}><label>E-mail<input type="email" autoComplete="username" value={loginEmail} onChange={event => setLoginEmail(event.target.value)} required /></label><label>Senha<input type="password" autoComplete="current-password" value={loginPassword} onChange={event => setLoginPassword(event.target.value)} required /></label>{authMessage && <p className="auth-error">{authMessage}</p>}<Button type="submit" disabled={login.isPending}>{login.isPending ? "Entrando…" : "Entrar"} <ChevronRight size={18} /></Button></form></div></div>;
+  if (user.mustChangePassword) return <div className="login-screen"><div className="login-card"><ShieldCheck size={42} color="#e0a82e" /><h1>Defina sua nova senha</h1><p className="muted">Por segurança, troque a senha temporária antes de acessar o painel.</p><form className="login-form" onSubmit={event => { event.preventDefault(); setAuthMessage(""); changePassword.mutate({ currentPassword, newPassword }); }}><label>Senha temporária<input type="password" autoComplete="current-password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} required /></label><label>Nova senha (mínimo 12 caracteres)<input type="password" autoComplete="new-password" minLength={12} value={newPassword} onChange={event => setNewPassword(event.target.value)} required /></label>{authMessage && <p className="auth-error">{authMessage}</p>}<Button type="submit" disabled={changePassword.isPending}>{changePassword.isPending ? "Salvando…" : "Trocar senha"}</Button></form><Button kind="ghost" onClick={logout}><LogOut size={16} /> Sair</Button></div></div>;
   if (user.role !== "admin") return <div className="login-screen"><div className="login-card"><ShieldCheck size={42} color="#e0a82e" /><h1>Acesso restrito</h1><p className="muted">Sua conta não possui perfil de administrador.</p><Button kind="ghost" onClick={logout}><LogOut size={16} /> Sair</Button></div></div>;
 
   const cards = dashboard.data?.cards as any;

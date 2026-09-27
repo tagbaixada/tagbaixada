@@ -5,12 +5,16 @@ MVP full-stack para placas físicas com **QR Code e NFC permanentes**. Cada plac
 ## Arquitetura
 
 - **Frontend:** React + TypeScript + Vite + Tailwind CSS, painel desktop-first em português.
-- **Backend:** Express + tRPC, com operações administrativas protegidas por Manus OAuth e papel `admin`.
+- **Backend:** Express + tRPC, com operações administrativas protegidas por sessão local assinada e papel `admin`.
 - **Banco:** SQLite/libSQL via `@libsql/client`, conectado ao Turso. O banco é acessado exclusivamente no servidor.
 - **QR:** public codes aleatórios, não sequenciais, únicos e independentes do ID interno.
 - **Público:** resolver de QR que registra scan, redireciona para `google_review_url` manual ou renderiza landing page.
 - **Arte:** SVG de impressão, PNG de alta resolução, PDF e ZIP; os arquivos são derivados do registro correto e persistidos no storage.
-- **Integrações:** Turso/libSQL, Manus OAuth, GitHub e Cloudflare DNS. **Não há Google Places, Google Places API, busca automática, Place ID ou scraping.**
+- **Integrações:** Turso/libSQL, GitHub e Cloudflare DNS. **Não há Manus OAuth, Google Places, Google Places API, busca automática, Place ID ou scraping.**
+
+## Autenticação administrativa
+
+O painel usa login próprio por e-mail e senha. A senha é armazenada somente como hash `scrypt`, a sessão é um cookie `httpOnly` assinado por `JWT_SECRET` e o acesso administrativo exige `role=admin`. O bootstrap inicial usa uma senha temporária gerada fora do código e força a troca no primeiro acesso; não existe senha, token ou segredo versionado no repositório. A recuperação automática de senha por e-mail ainda depende de uma futura configuração de SMTP.
 
 ## Fluxo Google Review manual
 
@@ -52,7 +56,7 @@ No ambiente WebDev/Vercel, configure os secrets server-side:
 
 - `TURSO_DATABASE_URL` — URL `libsql://...` do banco.
 - `TURSO_AUTH_TOKEN` — token de acesso do banco.
-- `JWT_SECRET`, `VITE_APP_ID`, `OAUTH_SERVER_URL`, `VITE_OAUTH_PORTAL_URL`, `OWNER_OPEN_ID` — autenticação Manus.
+- `JWT_SECRET` — segredo server-side forte para assinar sessões locais.
 - `PUBLIC_BASE_URL=https://go.rsadigitalconsultoria.com.br`.
 - `APP_BASE_URL=https://app.rsadigitalconsultoria.com.br`.
 
@@ -62,7 +66,7 @@ Por segurança, as credenciais são administradas pelo cofre de secrets do ambie
 
 A migration versionada está em `drizzle/0001_rsa_qr.sql` e cria:
 
-- `users`
+- `users` (incluindo `password_hash` e `must_change_password` para autenticação local)
 - `customers` (incluindo `google_review_url`)
 - `qr_codes`
 - `links`

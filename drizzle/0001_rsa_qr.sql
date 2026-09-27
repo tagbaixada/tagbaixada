@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT,
   email TEXT,
   login_method TEXT,
+  password_hash TEXT,
+  must_change_password INTEGER NOT NULL DEFAULT 0,
   role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
