@@ -28,6 +28,8 @@ const customerInput = z.object({
   state: z.string().trim().max(2).default(""),
   notes: z.string().trim().max(2000).optional().or(z.literal("")),
   googleReviewUrl: z.string().trim().optional().or(z.literal("")),
+  description: z.string().trim().max(500).optional().or(z.literal("")),
+  logoUrl: z.string().trim().optional().or(z.literal("")),
 });
 const linkInput = z.object({
   customerId: z.number().int().positive(),
@@ -50,14 +52,28 @@ function requireUrl(value: string | null | undefined, message?: string) {
 }
 
 function validateLinkValue(type: string, value: string) {
+  if (!["GOOGLE_REVIEW", "INSTAGRAM", "WHATSAPP", "PIX", "WIFI", "SITE", "GOOGLE_MAPS"].includes(type)) throw new TRPCError({ code: "BAD_REQUEST", message: "Tipo de link não permitido." });
   if (/^(javascript|data|vbscript):/i.test(value.trim())) invalidUrl("Links javascript:, data: e vbscript: não são permitidos.");
-  if (["SITE", "INSTAGRAM", "WHATSAPP", "GOOGLE_REVIEW"].includes(type)) return requireUrl(value);
-  return value;
+  if (["SITE", "INSTAGRAM", "GOOGLE_REVIEW", "GOOGLE_MAPS"].includes(type)) return requireUrl(value);
+  if (type === "WHATSAPP") {
+    let data: { phone?: string; message?: string };
+    try { data = JSON.parse(value); } catch { data = { phone: value }; }
+    const phone = String(data.phone ?? "").replace(/\D/g, "");
+    if (phone.length < 8) throw new TRPCError({ code: "BAD_REQUEST", message: "Informe um telefone válido para o WhatsApp." });
+    return `https://wa.me/${phone}${data.message ? `?text=${encodeURIComponent(data.message)}` : ""}`;
+  }
+  if (type === "WIFI") {
+    let data: { ssid?: string; password?: string; security?: string };
+    try { data = JSON.parse(value); } catch { throw new TRPCError({ code: "BAD_REQUEST", message: "Configure a rede Wi-Fi com SSID, senha e segurança." }); }
+    if (!data.ssid || !["WPA", "WPA2", "WPA/WPA3", "WEP", "OPEN"].includes(data.security ?? "")) throw new TRPCError({ code: "BAD_REQUEST", message: "Dados de Wi-Fi inválidos." });
+    return JSON.stringify({ ssid: data.ssid.slice(0, 120), password: String(data.password ?? "").slice(0, 120), security: data.security });
+  }
+  return value.trim();
 }
 
 async function getQr(id: number) {
   const rows = await query<any>(
-    "SELECT q.*, c.business_name, c.phone, c.email, c.address, c.city, c.state, c.notes, c.google_review_url FROM qr_codes q LEFT JOIN customers c ON c.id=q.customer_id WHERE q.id=? LIMIT 1",
+    "SELECT q.*, c.business_name, c.phone, c.email, c.address, c.city, c.state, c.notes, c.google_review_url, c.description, c.logo_url FROM qr_codes q LEFT JOIN customers c ON c.id=q.customer_id WHERE q.id=? LIMIT 1",
     [id],
   );
   return rows[0] ?? null;
@@ -154,7 +170,8 @@ export const appRouter = router({
       }
       const now = Date.now();
       const review = input.googleReviewUrl ? requireUrl(input.googleReviewUrl) : null;
-      const result = await run("INSERT INTO customers (business_name, phone, email, address, city, state, notes, google_review_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [input.businessName, input.phone, input.email || null, input.address || null, input.city, input.state.toUpperCase(), input.notes || null, review, now, now]);
+      const logo = input.logoUrl ? requireUrl(input.logoUrl, "A logo deve ser uma URL HTTP ou HTTPS válida.") : null;
+      const result = await run("INSERT INTO customers (business_name, phone, email, address, city, state, notes, google_review_url, description, logo_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [input.businessName, input.phone, input.email || null, input.address || null, input.city, input.state.toUpperCase(), input.notes || null, review, input.description || null, logo, now, now]);
       const id = Number(result.lastInsertRowid);
       await audit("CUSTOMER_CREATED", "customer", id, { businessName: input.businessName, phone: input.phone }, ctx.user.openId);
       return { id };
@@ -165,7 +182,8 @@ export const appRouter = router({
         if (duplicate) throw new TRPCError({ code: "CONFLICT", message: `Este telefone já pertence a ${duplicate.business_name}.` });
       }
       const review = input.googleReviewUrl ? requireUrl(input.googleReviewUrl) : null;
-      await run("UPDATE customers SET business_name=?, phone=?, email=?, address=?, city=?, state=?, notes=?, google_review_url=?, updated_at=? WHERE id=?", [input.businessName, input.phone, input.email || null, input.address || null, input.city, input.state.toUpperCase(), input.notes || null, review, Date.now(), input.id]);
+      const logo = input.logoUrl ? requireUrl(input.logoUrl, "A logo deve ser uma URL HTTP ou HTTPS válida.") : null;
+      await run("UPDATE customers SET business_name=?, phone=?, email=?, address=?, city=?, state=?, notes=?, google_review_url=?, description=?, logo_url=?, updated_at=? WHERE id=?", [input.businessName, input.phone, input.email || null, input.address || null, input.city, input.state.toUpperCase(), input.notes || null, review, input.description || null, logo, Date.now(), input.id]);
       await audit("CUSTOMER_UPDATED", "customer", input.id, { businessName: input.businessName, phone: input.phone }, ctx.user.openId);
       return { success: true };
     }),
@@ -267,6 +285,16 @@ export const appRouter = router({
       if (input.id) await run("UPDATE links SET type=?, label=?, value=?, icon=?, position=?, enabled=?, updated_at=? WHERE id=? AND customer_id=?", [input.type, input.label, value, input.icon, input.position, input.enabled ? 1 : 0, Date.now(), input.id, input.customerId]);
       else await run("INSERT INTO links (customer_id,type,label,value,icon,position,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)", [input.customerId, input.type, input.label, value, input.icon, input.position, input.enabled ? 1 : 0, Date.now(), Date.now()]);
       await audit("LINKS_CHANGED", "customer", input.customerId, input, ctx.user.openId);
+      return { success: true };
+    }),
+    deleteLink: adminProcedure.input(z.object({ id: z.number().int().positive(), customerId: z.number().int().positive() })).mutation(async ({ input, ctx }) => {
+      await run("DELETE FROM links WHERE id=? AND customer_id=?", [input.id, input.customerId]);
+      await audit("LINK_DELETED", "customer", input.customerId, { linkId: input.id }, ctx.user.openId);
+      return { success: true };
+    }),
+    reorderLinks: adminProcedure.input(z.object({ customerId: z.number().int().positive(), ids: z.array(z.number().int().positive()).max(50) })).mutation(async ({ input, ctx }) => {
+      for (const [position, id] of Array.from(input.ids.entries())) await run("UPDATE links SET position=?, updated_at=? WHERE id=? AND customer_id=?", [position, Date.now(), id, input.customerId]);
+      await audit("LINKS_REORDERED", "customer", input.customerId, { ids: input.ids }, ctx.user.openId);
       return { success: true };
     }),
     audit: adminProcedure.input(z.object({ entityType: z.string().optional(), entityId: z.number().optional() }).default({})).query(({ input }) => query<any>("SELECT * FROM audit_logs WHERE (? = '' OR entity_type=?) AND (? IS NULL OR entity_id=?) ORDER BY created_at DESC LIMIT 100", [input.entityType ?? "", input.entityType ?? "", input.entityId ?? null, input.entityId ?? null])),

@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS customers (
   state TEXT NOT NULL DEFAULT '',
   notes TEXT,
   google_review_url TEXT,
+  description TEXT,
+  logo_url TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );

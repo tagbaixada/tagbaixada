@@ -9,6 +9,7 @@ import { users, type InsertUser } from "../drizzle/schema";
 let client: Client | null = null;
 let ready: Promise<void> | null = null;
 let migration: string | null = null;
+let identityMigrationDone = false;
 
 function getMigration() {
   if (migration !== null) return migration;
@@ -37,6 +38,12 @@ export async function ensureDb() {
       : Promise.resolve();
   }
   await ready;
+  if (!identityMigrationDone) {
+    for (const statement of ["ALTER TABLE customers ADD COLUMN description TEXT", "ALTER TABLE customers ADD COLUMN logo_url TEXT"]) {
+      try { await getDb().execute(statement); } catch { /* coluna já existe */ }
+    }
+    identityMigrationDone = true;
+  }
 }
 export async function query<T = Record<string, unknown>>(sql: string, args: InValue[] = []) { await ensureDb(); const result = await getDb().execute({ sql, args }); return result.rows as unknown as T[]; }
 export async function run(sql: string, args: InValue[] = []) { await ensureDb(); return getDb().execute({ sql, args }); }
@@ -56,5 +63,5 @@ export async function getUserByOpenId(openId: string) {
   const db = drizzle(ENV.databaseUrl); const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1); return result[0];
 }
 export async function getCustomer(id: number) { return (await query<any>("SELECT * FROM customers WHERE id = ? LIMIT 1", [id]))[0] ?? null; }
-export async function getQrByCode(publicCode: string) { return (await query<any>("SELECT q.*, c.business_name, c.phone, c.email, c.address, c.city, c.state, c.notes, c.google_review_url FROM qr_codes q LEFT JOIN customers c ON c.id = q.customer_id WHERE q.public_code = ? LIMIT 1", [publicCode]))[0] ?? null; }
+export async function getQrByCode(publicCode: string) { return (await query<any>("SELECT q.*, c.business_name, c.phone, c.email, c.address, c.city, c.state, c.notes, c.google_review_url, c.description, c.logo_url FROM qr_codes q LEFT JOIN customers c ON c.id = q.customer_id WHERE q.public_code = ? LIMIT 1", [publicCode]))[0] ?? null; }
 export async function getLinks(customerId: number) { return query<any>("SELECT * FROM links WHERE customer_id = ? ORDER BY position ASC, id ASC", [customerId]); }

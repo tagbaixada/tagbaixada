@@ -38,6 +38,14 @@ O botão **Gerar lote** cria os QR Codes em estoque e inicia a produção das ar
 
 O lote passa por `GENERATING` para `READY`. O painel mostra o progresso e só libera o ZIP quando todos os itens estão prontos. O endpoint de download monta o ZIP a partir dos arquivos persistidos, evitando uma requisição única de vários minutos e tornando o fluxo compatível com o limite de execução da Vercel. Cada arte contém o QR permanente `https://go.rsadigitalconsultoria.com.br/{public_code}` e a correspondência serial ↔ public code fica registrada no manifesto.
 
+## Etapa 6 — Landing Page e gestão de links
+
+Quando um QR ativo está em `LANDING_PAGE`, o resolver público renderiza uma página própria, mobile-first e sem dependência de Linktree, trackers ou APIs do Google. A página mostra o nome, descrição e logo opcional do cliente, somente os links habilitados e uma identificação discreta da TAG. `GOOGLE_REVIEW` continua sendo um redirecionamento direto para a URL manual cadastrada.
+
+Os tipos aceitos são `GOOGLE_REVIEW`, `INSTAGRAM`, `WHATSAPP`, `PIX`, `WIFI`, `SITE` e `GOOGLE_MAPS`. WhatsApp é normalizado para `wa.me`; Wi-Fi é armazenado como dados estruturados e recebe QR de conexão; Pix é copiado no navegador. Links são ordenados por `position`, podem ser ativados/desativados e removidos pelo painel, sempre com validação de protocolo e sem HTML arbitrário.
+
+O banco existente de `links` foi preservado. A tabela `customers` recebeu apenas `description` e `logo_url`; a inicialização aplica essas duas colunas de forma idempotente para instalações Turso existentes, sem apagar ou duplicar dados.
+
 ## Variáveis de ambiente
 
 No ambiente WebDev/Vercel, configure os secrets server-side:

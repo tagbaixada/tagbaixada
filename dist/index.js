@@ -73,6 +73,7 @@ var schemaHealthCheck = sql`select 1`;
 var client = null;
 var ready = null;
 var migration = null;
+var identityMigrationDone = false;
 function getMigration() {
   if (migration !== null) return migration;
   try {
@@ -99,6 +100,15 @@ async function ensureDb() {
     }) : Promise.resolve();
   }
   await ready;
+  if (!identityMigrationDone) {
+    for (const statement of ["ALTER TABLE customers ADD COLUMN description TEXT", "ALTER TABLE customers ADD COLUMN logo_url TEXT"]) {
+      try {
+        await getDb().execute(statement);
+      } catch {
+      }
+    }
+    identityMigrationDone = true;
+  }
 }
 async function query(sql2, args = []) {
   await ensureDb();
@@ -133,7 +143,7 @@ async function getCustomer(id) {
   return (await query("SELECT * FROM customers WHERE id = ? LIMIT 1", [id]))[0] ?? null;
 }
 async function getQrByCode(publicCode) {
-  return (await query("SELECT q.*, c.business_name, c.phone, c.email, c.address, c.city, c.state, c.notes, c.google_review_url FROM qr_codes q LEFT JOIN customers c ON c.id = q.customer_id WHERE q.public_code = ? LIMIT 1", [publicCode]))[0] ?? null;
+  return (await query("SELECT q.*, c.business_name, c.phone, c.email, c.address, c.city, c.state, c.notes, c.google_review_url, c.description, c.logo_url FROM qr_codes q LEFT JOIN customers c ON c.id = q.customer_id WHERE q.public_code = ? LIMIT 1", [publicCode]))[0] ?? null;
 }
 async function getLinks(customerId) {
   return query("SELECT * FROM links WHERE customer_id = ? ORDER BY position ASC, id ASC", [customerId]);
@@ -828,7 +838,9 @@ var customerInput = z2.object({
   city: z2.string().trim().max(80).default(""),
   state: z2.string().trim().max(2).default(""),
   notes: z2.string().trim().max(2e3).optional().or(z2.literal("")),
-  googleReviewUrl: z2.string().trim().optional().or(z2.literal(""))
+  googleReviewUrl: z2.string().trim().optional().or(z2.literal("")),
+  description: z2.string().trim().max(500).optional().or(z2.literal("")),
+  logoUrl: z2.string().trim().optional().or(z2.literal(""))
 });
 var linkInput = z2.object({
   customerId: z2.number().int().positive(),
@@ -848,13 +860,35 @@ function requireUrl(value, message) {
   return safe;
 }
 function validateLinkValue(type, value) {
+  if (!["GOOGLE_REVIEW", "INSTAGRAM", "WHATSAPP", "PIX", "WIFI", "SITE", "GOOGLE_MAPS"].includes(type)) throw new TRPCError3({ code: "BAD_REQUEST", message: "Tipo de link n\xE3o permitido." });
   if (/^(javascript|data|vbscript):/i.test(value.trim())) invalidUrl("Links javascript:, data: e vbscript: n\xE3o s\xE3o permitidos.");
-  if (["SITE", "INSTAGRAM", "WHATSAPP", "GOOGLE_REVIEW"].includes(type)) return requireUrl(value);
-  return value;
+  if (["SITE", "INSTAGRAM", "GOOGLE_REVIEW", "GOOGLE_MAPS"].includes(type)) return requireUrl(value);
+  if (type === "WHATSAPP") {
+    let data;
+    try {
+      data = JSON.parse(value);
+    } catch {
+      data = { phone: value };
+    }
+    const phone = String(data.phone ?? "").replace(/\D/g, "");
+    if (phone.length < 8) throw new TRPCError3({ code: "BAD_REQUEST", message: "Informe um telefone v\xE1lido para o WhatsApp." });
+    return `https://wa.me/${phone}${data.message ? `?text=${encodeURIComponent(data.message)}` : ""}`;
+  }
+  if (type === "WIFI") {
+    let data;
+    try {
+      data = JSON.parse(value);
+    } catch {
+      throw new TRPCError3({ code: "BAD_REQUEST", message: "Configure a rede Wi-Fi com SSID, senha e seguran\xE7a." });
+    }
+    if (!data.ssid || !["WPA", "WPA2", "WPA/WPA3", "WEP", "OPEN"].includes(data.security ?? "")) throw new TRPCError3({ code: "BAD_REQUEST", message: "Dados de Wi-Fi inv\xE1lidos." });
+    return JSON.stringify({ ssid: data.ssid.slice(0, 120), password: String(data.password ?? "").slice(0, 120), security: data.security });
+  }
+  return value.trim();
 }
 async function getQr(id) {
   const rows = await query(
-    "SELECT q.*, c.business_name, c.phone, c.email, c.address, c.city, c.state, c.notes, c.google_review_url FROM qr_codes q LEFT JOIN customers c ON c.id=q.customer_id WHERE q.id=? LIMIT 1",
+    "SELECT q.*, c.business_name, c.phone, c.email, c.address, c.city, c.state, c.notes, c.google_review_url, c.description, c.logo_url FROM qr_codes q LEFT JOIN customers c ON c.id=q.customer_id WHERE q.id=? LIMIT 1",
     [id]
   );
   return rows[0] ?? null;
@@ -943,7 +977,8 @@ var appRouter = router({
       }
       const now = Date.now();
       const review = input.googleReviewUrl ? requireUrl(input.googleReviewUrl) : null;
-      const result = await run("INSERT INTO customers (business_name, phone, email, address, city, state, notes, google_review_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [input.businessName, input.phone, input.email || null, input.address || null, input.city, input.state.toUpperCase(), input.notes || null, review, now, now]);
+      const logo = input.logoUrl ? requireUrl(input.logoUrl, "A logo deve ser uma URL HTTP ou HTTPS v\xE1lida.") : null;
+      const result = await run("INSERT INTO customers (business_name, phone, email, address, city, state, notes, google_review_url, description, logo_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [input.businessName, input.phone, input.email || null, input.address || null, input.city, input.state.toUpperCase(), input.notes || null, review, input.description || null, logo, now, now]);
       const id = Number(result.lastInsertRowid);
       await audit("CUSTOMER_CREATED", "customer", id, { businessName: input.businessName, phone: input.phone }, ctx.user.openId);
       return { id };
@@ -954,7 +989,8 @@ var appRouter = router({
         if (duplicate) throw new TRPCError3({ code: "CONFLICT", message: `Este telefone j\xE1 pertence a ${duplicate.business_name}.` });
       }
       const review = input.googleReviewUrl ? requireUrl(input.googleReviewUrl) : null;
-      await run("UPDATE customers SET business_name=?, phone=?, email=?, address=?, city=?, state=?, notes=?, google_review_url=?, updated_at=? WHERE id=?", [input.businessName, input.phone, input.email || null, input.address || null, input.city, input.state.toUpperCase(), input.notes || null, review, Date.now(), input.id]);
+      const logo = input.logoUrl ? requireUrl(input.logoUrl, "A logo deve ser uma URL HTTP ou HTTPS v\xE1lida.") : null;
+      await run("UPDATE customers SET business_name=?, phone=?, email=?, address=?, city=?, state=?, notes=?, google_review_url=?, description=?, logo_url=?, updated_at=? WHERE id=?", [input.businessName, input.phone, input.email || null, input.address || null, input.city, input.state.toUpperCase(), input.notes || null, review, input.description || null, logo, Date.now(), input.id]);
       await audit("CUSTOMER_UPDATED", "customer", input.id, { businessName: input.businessName, phone: input.phone }, ctx.user.openId);
       return { success: true };
     }),
@@ -1066,6 +1102,16 @@ var appRouter = router({
       await audit("LINKS_CHANGED", "customer", input.customerId, input, ctx.user.openId);
       return { success: true };
     }),
+    deleteLink: adminProcedure2.input(z2.object({ id: z2.number().int().positive(), customerId: z2.number().int().positive() })).mutation(async ({ input, ctx }) => {
+      await run("DELETE FROM links WHERE id=? AND customer_id=?", [input.id, input.customerId]);
+      await audit("LINK_DELETED", "customer", input.customerId, { linkId: input.id }, ctx.user.openId);
+      return { success: true };
+    }),
+    reorderLinks: adminProcedure2.input(z2.object({ customerId: z2.number().int().positive(), ids: z2.array(z2.number().int().positive()).max(50) })).mutation(async ({ input, ctx }) => {
+      for (const [position, id] of Array.from(input.ids.entries())) await run("UPDATE links SET position=?, updated_at=? WHERE id=? AND customer_id=?", [position, Date.now(), id, input.customerId]);
+      await audit("LINKS_REORDERED", "customer", input.customerId, { ids: input.ids }, ctx.user.openId);
+      return { success: true };
+    }),
     audit: adminProcedure2.input(z2.object({ entityType: z2.string().optional(), entityId: z2.number().optional() }).default({})).query(({ input }) => query("SELECT * FROM audit_logs WHERE (? = '' OR entity_type=?) AND (? IS NULL OR entity_id=?) ORDER BY created_at DESC LIMIT 100", [input.entityType ?? "", input.entityType ?? "", input.entityId ?? null, input.entityId ?? null]))
   })
 });
@@ -1147,6 +1193,7 @@ function serveStatic(app2) {
 }
 
 // server/_core/index.ts
+import QRCode2 from "qrcode";
 var app = express2();
 function isPortAvailable(port) {
   return new Promise((resolve) => {
@@ -1160,8 +1207,32 @@ async function findAvailablePort(startPort = 3e3) {
   throw new Error(`No available port found starting from ${startPort}`);
 }
 var escapeHtml = (value) => String(value ?? "").replace(/[&<>\"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[char]);
+var escapeJsString = (value) => JSON.stringify(String(value ?? "")).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
 function publicHtml(title, body) {
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} \xB7 RSA Digital</title><style>body{margin:0;background:#eff5ff;color:#102a43;font-family:Arial,sans-serif;min-height:100vh;display:grid;place-items:center}.card{width:min(92vw,480px);background:#fff;border-radius:28px;padding:34px;box-shadow:0 18px 50px #174f9126;text-align:center}h1{margin:4px 0 10px;font-size:28px}.muted{color:#60758b;line-height:1.6}.links{display:grid;gap:12px;margin-top:26px}.links a,.links button{border:0;border-radius:14px;background:#0e4b9b;color:#fff;padding:15px;font-weight:700;text-decoration:none;font-size:15px;cursor:pointer}</style></head><body><main class="card">${body}</main></body></html>`;
+}
+async function landingBody(qr, links) {
+  const logo = safeExternalUrl(qr.logo_url);
+  const identity = `${logo ? `<img src="${escapeHtml(logo)}" alt="Logo" style="width:84px;height:84px;object-fit:contain;border-radius:22px;margin:0 auto 16px">` : `<div style="width:76px;height:76px;border-radius:22px;background:#0e4b9b;color:#ffd74b;display:grid;place-items:center;margin:0 auto 18px;font-weight:900;font-size:22px">RSA</div>`}<h1>${escapeHtml(qr.business_name || "Sua empresa")}</h1>${qr.description ? `<p class="muted">${escapeHtml(qr.description)}</p>` : ""}`;
+  const buttons = [];
+  for (const link of links.filter((item) => Number(item.enabled)).sort((a, b) => Number(a.position) - Number(b.position) || Number(a.id) - Number(b.id))) {
+    const icon = { GOOGLE_REVIEW: "\u2605", INSTAGRAM: "\u25CE", WHATSAPP: "\u25C9", PIX: "\u20BF", WIFI: "\u2301", SITE: "\u2197", GOOGLE_MAPS: "\u2316" }[link.type] || "\u2022";
+    if (link.type === "PIX") buttons.push(`<button onclick="navigator.clipboard.writeText(${escapeJsString(link.value)});this.textContent='Chave Pix copiada'">${icon} ${escapeHtml(link.label || "Copiar chave Pix")}</button>`);
+    else if (link.type === "WIFI") {
+      try {
+        const wifi = JSON.parse(link.value);
+        const security = wifi.security === "OPEN" ? "" : `T:${wifi.security};`;
+        const payload = `WIFI:${security}S:${String(wifi.ssid).replace(/[\\;,:]/g, "\\$&")};P:${String(wifi.password || "").replace(/[\\;,:]/g, "\\$&")};;`;
+        const qrImage = await QRCode2.toDataURL(payload, { width: 180, margin: 1 });
+        buttons.push(`<div style="background:#f2f6fb;border-radius:14px;padding:14px"><b>${icon} ${escapeHtml(link.label || "Wi-Fi")}</b><div class="muted">Rede: ${escapeHtml(wifi.ssid)}</div><img src="${qrImage}" alt="QR Wi-Fi" style="width:140px;margin:10px auto;display:block"><button onclick="navigator.clipboard.writeText(${escapeJsString(wifi.password || "")});this.textContent='Senha copiada'">Copiar senha</button></div>`);
+      } catch {
+      }
+    } else {
+      const url = safeExternalUrl(link.value);
+      if (url) buttons.push(`<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${icon} ${escapeHtml(link.label)}</a>`);
+    }
+  }
+  return `${identity}<p class="muted">Acesse os canais oficiais e deixe sua avalia\xE7\xE3o.</p><div class="links">${buttons.join("")}</div><small style="display:block;margin-top:28px;color:#9aabc0">Powered by TAG \xB7 RSA Digital</small>`;
 }
 async function requireArtworkAdmin(req, res) {
   try {
@@ -1188,9 +1259,7 @@ function registerPublicRoutes() {
       const reviewUrl = safeExternalUrl(qr.google_review_url) || qr.destination_url;
       if (qr.mode === "GOOGLE_REVIEW" && reviewUrl) return res.redirect(reviewUrl);
       const links = qr.customer_id ? await getLinks(qr.customer_id) : [];
-      const visible = links.filter((link) => Number(link.enabled));
-      const buttons = visible.map((link) => link.type === "PIX" ? `<button onclick="navigator.clipboard.writeText('${escapeHtml(link.value)}');this.textContent='Chave Pix copiada'">${escapeHtml(link.label)}</button>` : `<a href="${escapeHtml(link.value)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>`).join("");
-      return res.send(publicHtml(qr.business_name || "RSA Digital", `<div style="width:76px;height:76px;border-radius:22px;background:#0e4b9b;color:#ffd74b;display:grid;place-items:center;margin:0 auto 18px;font-weight:900;font-size:22px">RSA</div><h1>${escapeHtml(qr.business_name || "Sua empresa")}</h1><p class="muted">Acesse os canais oficiais e deixe sua avalia\xE7\xE3o.</p><div class="links">${buttons}</div>`));
+      return res.send(publicHtml(qr.business_name || "RSA Digital", await landingBody(qr, links)));
     } catch (error) {
       next(error);
     }
