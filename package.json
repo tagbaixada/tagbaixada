@@ -5,7 +5,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "NODE_ENV=development RUN_HTTP_SERVER=1 tsx watch server/_core/index.ts",
-    "build": "vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
+    "build": "vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --outfile=server-bundle/index.js",
     "start": "NODE_ENV=production RUN_HTTP_SERVER=1 node dist/index.js",
     "check": "tsc --noEmit",
     "format": "prettier --write .",
