@@ -3,10 +3,17 @@ import fs from "fs";
 import { type Server } from "http";
 import { nanoid } from "nanoid";
 import path from "path";
-import { createServer as createViteServer } from "vite";
-import viteConfig from "../../vite.config";
+
+const loadModule = new Function(
+  "modulePath",
+  "return import(modulePath)",
+) as (modulePath: string) => Promise<any>;
 
 export async function setupVite(app: Express, server: Server) {
+  const [{ createServer: createViteServer }, { default: viteConfig }] = await Promise.all([
+    loadModule("vite"),
+    loadModule("../../vite.config"),
+  ]);
   const serverOptions = {
     middlewareMode: true,
     hmr: { server },
